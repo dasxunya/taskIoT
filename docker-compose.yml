@@ -1,0 +1,149 @@
+version: "3.9"
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    ports:
+      - 22181:2181 
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - dasxunya-overlay-network
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    ports:
+      - 29092:9092 
+    depends_on:
+      - zookeeper
+    networks:
+      - dasxunya-overlay-network
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: IN_LISTENER://kafka:9092,EX_LESTENER://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: IN_LISTENER:PLAINTEXT,EX_LESTENER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: IN_LISTENER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1 
+
+  kafka-connect:
+    container_name: kafka-connect
+    build:
+      context: .
+      dockerfile: mongodb.Dockerfile
+    depends_on:
+      - kafka
+    networks:
+      - dasxunya-overlay-network
+    ports:
+      - 28083:8083
+    environment:
+      CONNECT_GROUP_ID: 1
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_ZOOKEEPER_CONNECT: zookeeper:2181
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_REST_PORT: 8083
+      CONNECT_CONFIG_STORAGE_TOPIC: dasxunya-config-topic
+      CONNECT_OFFSET_STORAGE_TOPIC: dasxunya-offset-topic
+      CONNECT_STATUS_STORAGE_TOPIC: dasxunya-status-topic
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - 8090:8080
+    restart: always
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      DYNAMIC_CONFIG_ENABLED: true
+    depends_on:
+      - kafka-connect
+    networks:
+      - dasxunya-overlay-network    
+  
+  mongodb-source:
+    image: mongo:latest
+    container_name: mongodb-source
+    networks:
+      - dasxunya-overlay-network
+    command: mongod --replSet dasxunya-replication-set --bind_ip_all 
+
+  mongodb-target:
+    image: mongo:latest
+    container_name: mongodb-target
+    networks:
+      - dasxunya-overlay-network
+    command: mongod --replSet dasxunya-replication-set
+
+  mongodb-source-setup:
+    image: mongo:latest
+    container_name: mongodb-source-setup
+    depends_on:
+      - mongodb-source
+    restart: no
+    networks:
+      - dasxunya-overlay-network
+    command: >
+      mongosh --host mongodb-source:27017 --eval '
+      rsconf = {
+        _id: "dasxunya-replication-set",
+        members: [{ _id: 0, host: "mongodb-source:27017", priority: 1.0 }],
+      };
+      rs.initiate(rsconf);
+      rs.status();
+      '
+
+  mongodb-target-setup:
+    image: mongo:latest
+    container_name: mongodb-target-setup
+    depends_on:
+      - mongodb-target
+    restart: no
+    networks:
+      - dasxunya-overlay-network
+    command: >
+      mongosh --host mongodb-target:27017 --eval '
+      rsconf = {
+        _id: "dasxunya-replication-set",
+        members: [{ _id: 0, host: "mongodb-target:27017", priority: 1.0 }],
+      };
+      rs.initiate(rsconf);
+      rs.status();
+      '
+
+  curl:
+    image: curlimages/curl:latest
+    container_name: curl
+    networks:
+      - dasxunya-overlay-network
+    command: sleep infinity
+    volumes:
+      - ./connectors:/home/curl_user/
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.2.2
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      - kafka
+    networks:
+      - dasxunya-overlay-network
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+  
+networks:
+  dasxunya-overlay-network:
+    driver: overlay
+    attachable: true
